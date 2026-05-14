@@ -1,0 +1,7 @@
+streamlit
+torch
+shap==0.48.0
+numpy==1.26.4
+matplotlib
+pandas
+transformers
