@@ -324,7 +324,9 @@ if run:
         my_bar = st.progress(0, text=progress_text)
         
         my_bar.progress(30, text="Mengekstrak probabilitas dengan IndoBERT...")
-        label, prob_hoaks, prob_fakta, best_chunk, total_chunks = predict(st.session_state.input_text)        prob_pred = prob_hoaks if label == "Hoaks" else prob_fakta
+        label, prob_hoaks, prob_fakta, best_chunk, total_chunks = predict(st.session_state.input_text)
+        prob_pred = prob_hoaks if label == "Hoaks" else prob_fakta
+        
         my_bar.progress(70, text="Menghitung kontribusi fitur (SHAP Values)...")
         
         shap_hoaks = compute_shap(best_chunk) 
