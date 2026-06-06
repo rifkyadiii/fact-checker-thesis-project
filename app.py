@@ -96,7 +96,7 @@ def load_model():
     explainer = shap.Explainer(pipe)
     return pipe, explainer, tokenizer
 
-pipe, explainer = load_model()
+pipe, explainer, tokenizer = load_model()
 
 # ─── HELPER: PREDICT & SHAP ───────────────────────────────────────────────────
 def predict(text: str):
