@@ -90,11 +90,9 @@ def load_model():
         tokenizer=tokenizer,
         device=device,
         top_k=None,
-        truncation=True,
-        max_length=MAX_LEN
     )
     explainer = shap.Explainer(pipe)
-    return pipe, explainer, tokenizer
+    return pipe, explainer
 
 pipe, explainer, tokenizer = load_model()
 
