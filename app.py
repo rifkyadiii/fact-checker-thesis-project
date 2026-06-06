@@ -14,7 +14,7 @@ MODEL_PATH  = "rifkyadiii/best_models_70_20_10"
 BASE_MODEL  = "indobenchmark/indobert-base-p1"
 MAX_LEN     = 128
 TOP_N       = 3
-CHUNK_WORDS = 90
+CHUNK_WORDS = 90   # ≈128 token untuk teks bahasa Indonesia
 
 # ─── PAGE SETUP ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -124,7 +124,9 @@ def compute_shap(text: str):
     all_values, all_data, all_base = [], [], []
 
     for chunk in chunks:
-        sv  = explainer([chunk])
+        # Explainer baru tiap chunk — cegah state/clustering lama bocor ke chunk berikutnya
+        fresh_explainer = shap.Explainer(pipe)
+        sv  = fresh_explainer([chunk])
         exp = sv[:, :, 1][0]           # Explanation LABEL_1 (Hoaks) per chunk
         all_values.append(exp.values)
         all_data.append(exp.data)
@@ -277,13 +279,22 @@ if run:
         my_bar = st.progress(0, text=progress_text)
 
         my_bar.progress(30, text="Mengekstrak probabilitas dengan IndoBERT...")
+        # ── PERUBAHAN: predict() sekarang mengembalikan num_chunks ──────────
         label, prob_hoaks, prob_fakta, num_chunks = predict(st.session_state.input_text)
         prob_pred = prob_hoaks if label == "Hoaks" else prob_fakta
 
         my_bar.progress(70, text="Menghitung kontribusi fitur (SHAP Values)...")
         shap_hoaks = compute_shap(st.session_state.input_text)
+
         my_bar.progress(100, text="Analisis Selesai!")
         st.toast('Selesai menganalisis teks!', icon='🎉')
+
+        # ── Info chunking (hanya tampil jika teks dipotong) ─────────────────
+        if num_chunks > 1:
+            st.info(
+                f"📄 Teks terlalu panjang — dibagi menjadi **{num_chunks} bagian** secara otomatis. "
+                f"Probabilitas = rata-rata semua bagian. SHAP = gabungan token dari semua bagian."
+            )
 
         # ── Hasil Prediksi ──────────────────────────────────────────────────
         st.divider()
@@ -309,7 +320,6 @@ if run:
 
         # ── Visualisasi SHAP ───────────────────────────────────────────────
         st.markdown("### 🎨 Visualisasi SHAP")
-
         tab1, tab2, tab3 = st.tabs(["📝 Text Highlight", "📉 Waterfall Plot", "📊 Data Tabel SHAP"])
 
         with tab1:
@@ -322,7 +332,7 @@ if run:
                 html_out = shap.plots.text(shap_hoaks[0], display=False)
                 if html_out:
                     html_wrapper = f'<div class="shap-html-container">{html_out}</div>'
-                    st.iframe(html_wrapper, height=350, scrolling=True)
+                    st.iframe(html_wrapper, height=350)
                 else:
                     st.info("Text plot tidak tersedia untuk teks ini.")
             except Exception as e:
