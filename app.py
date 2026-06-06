@@ -96,18 +96,57 @@ def load_model():
 
 pipe, explainer = load_model()
 
-# ─── HELPER: PREDICT & SHAP ───────────────────────────────────────────────────
-def predict(text: str):
-    out = pipe(text, truncation=True, max_length=MAX_LEN)[0]
-    scores = {item["label"]: item["score"] for item in out}
-    prob_hoaks = scores.get("LABEL_1", 0.0)
-    prob_fakta = scores.get("LABEL_0", 0.0)
-    label = "Hoaks" if prob_hoaks >= prob_fakta else "Fakta"
-    return label, prob_hoaks, prob_fakta
+# ─── HELPER: CHUNKING, PREDICT & SHAP ─────────────────────────────────────────
 
-def compute_shap(text: str):
-    sv = explainer([text])
-    return sv[:, :, 1]   
+def chunk_text(text: str, max_tokens=510):
+    """Memecah teks panjang menjadi beberapa potongan berdasarkan batasan token."""
+    tokens = tokenizer.tokenize(text)
+    chunks = []
+    # Loop untuk memotong token per max_tokens
+    for i in range(0, len(tokens), max_tokens):
+        chunk_tokens = tokens[i:i + max_tokens]
+        chunks.append(tokenizer.convert_tokens_to_string(chunk_tokens))
+    return chunks
+
+def predict(text: str):
+    """Memprediksi menggunakan teknik rata-rata (average ensemble) pada chunks."""
+    chunks = chunk_text(text, max_tokens=510) # 510 agar ada sisa ruang untuk token spesial [CLS] & [SEP]
+    
+    total_prob_hoaks = 0.0
+    total_prob_fakta = 0.0
+    chunk_details = []
+    
+    for chunk in chunks:
+        out = pipe(chunk)[0]
+        prob_h = out["score"] if out["label"] == "LABEL_1" else 1 - out["score"]
+        prob_f = out["score"] if out["label"] == "LABEL_0" else 1 - out["score"]
+        
+        total_prob_hoaks += prob_h
+        total_prob_fakta += prob_f
+        
+        chunk_details.append({
+            "chunk_text": chunk,
+            "prob_hoaks": prob_h,
+            "prob_fakta": prob_f
+        })
+        
+    # Hitung rata-rata
+    avg_prob_hoaks = total_prob_hoaks / len(chunks)
+    avg_prob_fakta = total_prob_fakta / len(chunks)
+    label = "Hoaks" if avg_prob_hoaks >= avg_prob_fakta else "Fakta"
+    
+    # Cari potongan teks (chunk) yang paling memengaruhi hasil akhir untuk dianalisis SHAP
+    if label == "Hoaks":
+        best_chunk = max(chunk_details, key=lambda x: x["prob_hoaks"])["chunk_text"]
+    else:
+        best_chunk = max(chunk_details, key=lambda x: x["prob_fakta"])["chunk_text"]
+        
+    return label, avg_prob_hoaks, avg_prob_fakta, best_chunk, len(chunks)
+
+def compute_shap(best_chunk: str):
+    """Hanya menghitung nilai SHAP dari potongan teks yang paling mencurigakan/faktual."""
+    sv = explainer([best_chunk])
+    return sv[:, :, 1] 
 
 def waterfall_fig(shap_hoaks, max_display: int, label: str, prob: float):
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -288,7 +327,6 @@ if run:
         my_bar.progress(100, text="Analisis Selesai!")
         st.toast('Selesai menganalisis teks!', icon='🎉')
         
-
         # ── Hasil Prediksi (DASHBOARD METRICS) ─────────────────────────────
         st.divider()
         
