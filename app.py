@@ -289,13 +289,6 @@ if run:
         my_bar.progress(100, text="Analisis Selesai!")
         st.toast('Selesai menganalisis teks!', icon='🎉')
 
-        # ── Info chunking (hanya tampil jika teks dipotong) ─────────────────
-        if num_chunks > 1:
-            st.info(
-                f"📄 Teks terlalu panjang — dibagi menjadi **{num_chunks} bagian** secara otomatis. "
-                f"Probabilitas = rata-rata semua bagian. SHAP = gabungan token dari semua bagian."
-            )
-
         # ── Hasil Prediksi ──────────────────────────────────────────────────
         st.divider()
 
