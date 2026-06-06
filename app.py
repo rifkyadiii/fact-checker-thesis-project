@@ -113,16 +113,19 @@ def chunk_text(text: str, max_tokens=510):
 
 def predict(text: str):
     """Memprediksi menggunakan teknik rata-rata (average ensemble) pada chunks."""
-    chunks = chunk_text(text, max_tokens=510) # 510 agar ada sisa ruang untuk token spesial [CLS] & [SEP]
+    chunks = chunk_text(text, max_tokens=510) 
     
     total_prob_hoaks = 0.0
     total_prob_fakta = 0.0
     chunk_details = []
     
     for chunk in chunks:
-        out = pipe(chunk)[0]
-        prob_h = out["score"] if out["label"] == "LABEL_1" else 1 - out["score"]
-        prob_f = out["score"] if out["label"] == "LABEL_0" else 1 - out["score"]
+        out = pipe(chunk)[0] 
+        
+        # PERBAIKAN: Menggunakan dictionary comprehension yang aman (seperti kodemu aslinya)
+        scores = {item["label"]: item["score"] for item in out}
+        prob_h = scores.get("LABEL_1", 0.0)
+        prob_f = scores.get("LABEL_0", 0.0)
         
         total_prob_hoaks += prob_h
         total_prob_fakta += prob_f
@@ -321,12 +324,11 @@ if run:
         my_bar = st.progress(0, text=progress_text)
         
         my_bar.progress(30, text="Mengekstrak probabilitas dengan IndoBERT...")
-        label, prob_hoaks, prob_fakta = predict(st.session_state.input_text)
-        prob_pred = prob_hoaks if label == "Hoaks" else prob_fakta
-
+        label, prob_hoaks, prob_fakta, best_chunk, total_chunks = predict(st.session_state.input_text)        prob_pred = prob_hoaks if label == "Hoaks" else prob_fakta
         my_bar.progress(70, text="Menghitung kontribusi fitur (SHAP Values)...")
-        shap_hoaks = compute_shap(st.session_state.input_text)
         
+        shap_hoaks = compute_shap(best_chunk) 
+               
         my_bar.progress(100, text="Analisis Selesai!")
         st.toast('Selesai menganalisis teks!', icon='🎉')
         
