@@ -1,20 +1,11 @@
 import streamlit as st
-import torch
-import shap
-import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib
-matplotlib.use("Agg")
-import io
 import pandas as pd
-from transformers import BertTokenizer, BertForSequenceClassification, pipeline
+import shap
 
-# ─── CONFIG ───────────────────────────────────────────────────────────────────
-MODEL_PATH  = "rifkyadiii/best_models_70_20_10"
-BASE_MODEL  = "indobenchmark/indobert-base-p1"
-MAX_LEN     = 128
-TOP_N       = 3
-CHUNK_WORDS = 90   # ≈128 token untuk teks bahasa Indonesia
+from src.model import load_model
+from src.predict import predict
+from src.utils import compute_shap, waterfall_fig, build_narasi
+from src.scraper import scrape_article
 
 # ─── PAGE SETUP ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -55,207 +46,71 @@ st.markdown("""
         div[data-testid="stContainer"] {
             border-radius: 10px;
         }
+        [data-testid="InputInstructions"] {
+            display: none !important;
+        }
     </style>
 """, unsafe_allow_html=True)
 
 # ─── STATE MANAGEMENT ─────────────────────────────────────────────────────────
 if "input_text" not in st.session_state:
     st.session_state.input_text = ""
+if "show_scrape_tip" not in st.session_state:
+    st.session_state.show_scrape_tip = False
 
 def clear_text():
     st.session_state.input_text = ""
+    st.session_state.show_scrape_tip = False
 
 # ─── SIDEBAR ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚙️ Pengaturan")
     st.markdown("Sesuaikan parameter visualisasi model di bawah ini.")
-    top_n_display   = st.slider("📊 Jumlah Fitur pada Waterfall Plot", min_value=5, max_value=20, value=10, step=1)
-    table_n_display = st.slider("🗂️ Jumlah Data pada Tabel SHAP",       min_value=5, max_value=50, value=10, step=1)
+    top_n_display   = st.slider("📊 Jumlah Fitur pada Waterfall Plot", min_value=5,  max_value=20, value=10, step=1)
+    table_n_display = st.slider("🗂️ Jumlah Data pada Tabel SHAP",       min_value=5,  max_value=50, value=10, step=1)
 
     st.markdown("---")
     st.markdown("### ℹ️ Tentang Model")
     st.info("**Base:** IndoBERT (p1)\n\n**Skenario:** 70-20-10\n\n**Explainability:** SHAP")
 
-# ─── LOAD MODEL (cached) ──────────────────────────────────────────────────────
-@st.cache_resource(show_spinner="🔄 Memuat model AI ke memori (Mohon tunggu)...")
-def load_model():
-    tokenizer = BertTokenizer.from_pretrained(BASE_MODEL)
-    model     = BertForSequenceClassification.from_pretrained(MODEL_PATH)
-    device    = 0 if torch.cuda.is_available() else -1
-    pipe      = pipeline(
-        "text-classification",
-        model=model,
-        tokenizer=tokenizer,
-        device=device,
-        top_k=None,
-    )
-    explainer = shap.Explainer(pipe)
-    return pipe, explainer
-
-pipe, explainer = load_model()
-
-# ─── HELPER: CHUNKING ────────────────────────────────────────────────────────
-def chunk_text(text: str) -> list:
-    """Memotong teks panjang menjadi potongan ±90 kata agar tidak melebihi MAX_LEN token."""
-    words = text.split()
-    if len(words) <= CHUNK_WORDS:
-        return [text]
-    return [" ".join(words[i:i + CHUNK_WORDS]) for i in range(0, len(words), CHUNK_WORDS)]
-
-# ─── HELPER: PREDICT (dengan chunking) ───────────────────────────────────────
-def predict(text: str):
-    chunks = chunk_text(text)
-    hoaks_scores, fakta_scores = [], []
-
-    for chunk in chunks:
-        out    = pipe(chunk, truncation=True, max_length=MAX_LEN)[0]
-        scores = {item["label"]: item["score"] for item in out}
-        hoaks_scores.append(scores.get("LABEL_1", 0.0))
-        fakta_scores.append(scores.get("LABEL_0", 0.0))
-
-    prob_hoaks = float(np.mean(hoaks_scores))
-    prob_fakta = float(np.mean(fakta_scores))
-    label      = "Hoaks" if prob_hoaks >= prob_fakta else "Fakta"
-    return label, prob_hoaks, prob_fakta, len(chunks)   # +num_chunks
-
-# ─── HELPER: SHAP (gabungkan semua chunk) ────────────────────────────────────
-def compute_shap(text: str):
-    chunks = chunk_text(text)
-    all_values, all_data, all_base = [], [], []
-
-    for chunk in chunks:
-        # Explainer baru tiap chunk — cegah state/clustering lama bocor ke chunk berikutnya
-        fresh_explainer = shap.Explainer(pipe)
-        sv  = fresh_explainer([chunk])
-        exp = sv[:, :, 1][0]           # Explanation LABEL_1 (Hoaks) per chunk
-        all_values.append(exp.values)
-        all_data.append(exp.data)
-        all_base.append(float(exp.base_values))
-
-    # Gabungkan token + SHAP values dari semua chunk jadi satu Explanation
-    combined = shap.Explanation(
-        values      = np.concatenate(all_values),
-        base_values = float(np.mean(all_base)),
-        data        = np.concatenate(all_data),
-    )
-    return [combined]   # dibungkus list agar shap_hoaks[0] tetap berfungsi
-
-# ─── HELPER: WATERFALL ───────────────────────────────────────────────────────
-def waterfall_fig(shap_hoaks, max_display: int, label: str, prob: float):
-    fig, ax = plt.subplots(figsize=(10, 6))
-    fig.patch.set_facecolor('white')
-    ax.set_facecolor('white')
-
-    shap.plots.waterfall(shap_hoaks[0], max_display=max_display, show=False)
-    fig = plt.gcf()
-    fig.suptitle(
-        f"Waterfall Plot — {label}",
-        fontsize=14, fontweight="bold", y=1.05, color="#1e3c72"
-    )
-
-    for text in fig.texts: text.set_color('black')
-    ax.tick_params(colors='black')
-
-    plt.tight_layout()
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor='white')
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-# ─── HELPER: NARASI NLG ──────────────────────────────────────────────────────
-def build_narasi(label: str, prob: float, shap_hoaks) -> str:
-    vals   = shap_hoaks[0].values
-    toks   = shap_hoaks[0].data
-    ranked = sorted(zip(toks, vals), key=lambda x: abs(x[1]), reverse=True)
-    top    = ranked[:TOP_N]
-
-    kelas_pred  = label
-    kelas_lawan = "Fakta" if label == "Hoaks" else "Hoaks"
-
-    def arah(val, label_pred):
-        return val > 0 if label_pred == "Hoaks" else val < 0
-
-    conf_pct = prob * 100
-
-    if conf_pct >= 90:   tingkat_keyakinan = "sangat tinggi"
-    elif conf_pct >= 75: tingkat_keyakinan = "tinggi"
-    elif conf_pct >= 60: tingkat_keyakinan = "cukup"
-    else:                tingkat_keyakinan = "relatif rendah"
-
-    kalimat_pembuka = (
-        f"Berdasarkan tinjauan model, berita ini diprediksi sebagai **{kelas_pred}** "
-        f"dengan confidence score **{conf_pct:.2f}%** — tingkat keyakinan model tergolong *{tingkat_keyakinan}*."
-    )
-
-    tok1, val1 = top[0]; tok1 = tok1.strip()
-    tok2, val2 = top[1]; tok2 = tok2.strip()
-    searah1, searah2 = arah(val1, kelas_pred), arah(val2, kelas_pred)
-
-    if searah1 and searah2:
-        kalimat_fitur = (
-            f"Keputusan tersebut terutama dipengaruhi oleh fitur **'{tok1}'** dan **'{tok2}'**, "
-            f"keduanya dinilai memberikan kontribusi besar yang mengarahkan model ke kategori **{kelas_pred}**."
-        )
-    elif searah1 and not searah2:
-        kalimat_fitur = (
-            f"fitur **'{tok1}'** menjadi pendorong utama ke arah **{kelas_pred}**, "
-            f"sementara fitur **'{tok2}'** justru memberikan sinyal berlawanan yang mengarah ke **{kelas_lawan}**."
-        )
-    elif not searah1 and searah2:
-        kalimat_fitur = (
-            f"fitur **'{tok2}'** memperkuat prediksi ke arah **{kelas_pred}**, "
-            f"sedangkan fitur **'{tok1}'** memberikan sinyal yang tidak sejalan, mengarah ke **{kelas_lawan}**."
-        )
-    else:
-        kalimat_fitur = (
-            f"Menariknya, fitur **'{tok1}'** dan **'{tok2}'** keduanya memberikan sinyal berlawanan dari prediksi utama, "
-            f"namun pengaruhnya belum cukup untuk mengubah keputusan model."
-        )
-
-    kalimat_kondisional = ""
-    if len(top) >= 3:
-        tok3, val3 = top[2]; tok3 = tok3.strip()
-        if arah(val3, kelas_pred):
-            kalimat_kondisional = (
-                f"Selain itu, keberadaan fitur **'{tok3}'** turut memperkuat kecenderungan model "
-                f"dalam mengklasifikasikan teks ini ke dalam kelas **{kelas_pred}**."
-            )
-        else:
-            kalimat_kondisional = (
-                f"Di sisi lain, fitur **'{tok3}'** memberikan sinyal yang tidak sejalan dengan prediksi utama — "
-                f"namun pengaruhnya relatif kecil sehingga tidak mengubah hasil keputusan model."
-            )
-
-    if kelas_pred == "Hoaks":
-        kalimat_penutup = (
-            "⚠️ **Rekomendasi:** Secara keseluruhan, pola linguistik dalam teks ini menunjukkan karakteristik yang umumnya "
-            "ditemukan pada konten hoaks. Disarankan untuk memverifikasi informasi ini melalui sumber terpercaya sebelum disebarluaskan."
-            if conf_pct >= 75 else
-            "⚠️ **Rekomendasi:** Model mendeteksi kemungkinan hoaks, namun dengan tingkat keyakinan yang belum terlalu tinggi. "
-            "Tetap lakukan verifikasi mandiri terhadap klaim-klaim dalam teks ini."
-        )
-    else:
-        kalimat_penutup = (
-            "⚠️ **Rekomendasi:** Secara keseluruhan, pola linguistik dalam teks ini konsisten dengan berita faktual. "
-            "Meski demikian, verifikasi tetap dianjurkan untuk memastikan akurasi informasi."
-            if conf_pct >= 75 else
-            "⚠️ **Rekomendasi:** Model cenderung mengklasifikasikan teks ini sebagai fakta, namun dengan keyakinan yang moderat — "
-            "tetap bijak dalam menyimpulkan."
-        )
-
-    bagian = [kalimat_pembuka, kalimat_fitur]
-    if kalimat_kondisional:
-        bagian.append(kalimat_kondisional)
-    bagian.append(kalimat_penutup)
-    return "\n\n".join(bagian)
+# ─── LOAD MODEL ───────────────────────────────────────────────────────────────
+pipe, _ = load_model()
 
 # ─── MAIN UI ──────────────────────────────────────────────────────────────────
 st.markdown('<p class="main-title">Ayok Cek Fakta!</p>', unsafe_allow_html=True)
 st.markdown('<p class="sub-title">Sistem Deteksi Hoaks Berbasis IndoBERT dengan Penjelasan SHAP</p>', unsafe_allow_html=True)
 
 st.markdown("### 📰 Masukkan Berita")
-text_col, action_col = st.columns([8, 1])
+
+# ── Input URL (opsional) ──────────────────────────────────────────────────────
+url_col, fetch_col = st.columns([8, 1], vertical_alignment="bottom")
+
+with url_col:
+    url_input = st.text_input(
+        "URL",
+        placeholder="🔗 Tempel link artikel (opsional) — kosongkan jika ingin input teks manual",
+        label_visibility="collapsed",
+    )
+with fetch_col:
+    fetch_btn = st.button("🌐 Ambil", width="stretch")
+
+if fetch_btn:
+    if not url_input.strip():
+        st.warning("⚠️ Masukkan URL terlebih dahulu.")
+    else:
+        with st.spinner("⏳ Mengambil teks dari halaman web..."):
+            scraped_text, scrape_error = scrape_article(url_input)
+            if scrape_error:
+                st.error(f"❌ {scrape_error}")
+            else:
+                st.session_state.input_text = scraped_text
+                st.session_state.show_scrape_tip = True
+                word_count = len(scraped_text.split())
+                st.success(f"✅ Berhasil mengambil **{word_count} kata** dari artikel.")
+                st.rerun()
+
+# ── Input Teks ────────────────────────────────────────────────────────────────
+text_col, action_col = st.columns([8, 1], vertical_alignment="bottom")
 
 with text_col:
     st.text_area(
@@ -267,31 +122,36 @@ with text_col:
     )
 
 with action_col:
-    st.markdown("<br>", unsafe_allow_html=True)
     run = st.button("🚀\nAnalisis", type="primary", width="stretch")
     st.button("🗑️\nHapus", on_click=clear_text, width="stretch")
 
+if st.session_state.show_scrape_tip:
+    st.info(
+        "📋 **Teks berhasil diambil.** Sebaiknya periksa kembali isinya sebelum dianalisis. "
+        "Untuk hasil yang lebih akurat, hapus bagian yang tidak relevan — seperti nama penulis, tanggal, "
+        "kategori, tag, atau teks navigasi yang ikut tersalin — dan pertahankan hanya isi narasi beritanya."
+    )
+
+# ─── ANALISIS ─────────────────────────────────────────────────────────────────
 if run:
     if len(st.session_state.input_text.strip()) < 10:
         st.warning("⚠️ Teks terlalu pendek. Mohon masukkan setidaknya satu kalimat utuh untuk dianalisis.")
     else:
-        progress_text = "Memulai mesin NLP..."
-        my_bar = st.progress(0, text=progress_text)
+        my_bar = st.progress(0, text="Memulai mesin NLP...")
+        st.session_state.show_scrape_tip = False
 
         my_bar.progress(30, text="Mengekstrak probabilitas dengan IndoBERT...")
-        # ── PERUBAHAN: predict() sekarang mengembalikan num_chunks ──────────
-        label, prob_hoaks, prob_fakta, num_chunks = predict(st.session_state.input_text)
+        label, prob_hoaks, prob_fakta, num_chunks = predict(st.session_state.input_text, pipe)
         prob_pred = prob_hoaks if label == "Hoaks" else prob_fakta
 
         my_bar.progress(70, text="Menghitung kontribusi fitur (SHAP Values)...")
-        shap_hoaks = compute_shap(st.session_state.input_text)
+        shap_hoaks = compute_shap(st.session_state.input_text, pipe)
 
         my_bar.progress(100, text="Analisis Selesai!")
-        st.toast('Selesai menganalisis teks!', icon='🎉')
+        st.toast("Selesai menganalisis teks!", icon="🎉")
 
-        # ── Hasil Prediksi ──────────────────────────────────────────────────
+        # ── Hasil Prediksi ───────────────────────────────────────────────────
         st.divider()
-
         if label == "Hoaks":
             st.error("### 🚨 TEKS TERINDIKASI HOAKS!")
         else:
@@ -299,19 +159,18 @@ if run:
 
         met_col1, met_col2, met_col3 = st.columns(3)
         with met_col1:
-            st.metric(label="Confidence Score", value=f"{prob_pred*100:.2f}%",
+            st.metric("Confidence Score", f"{prob_pred*100:.2f}%",
                       delta="Sangat Yakin" if prob_pred > 0.8 else "Kurang Yakin", delta_color="normal")
         with met_col2:
-            st.metric(label="Probabilitas Hoaks", value=f"{prob_hoaks*100:.2f}%")
+            st.metric("Probabilitas Hoaks", f"{prob_hoaks*100:.2f}%")
         with met_col3:
-            st.metric(label="Probabilitas Fakta", value=f"{prob_fakta*100:.2f}%")
+            st.metric("Probabilitas Fakta", f"{prob_fakta*100:.2f}%")
 
-        # ── Penjelasan Naratif ──────────────────────────────────────────────
+        # ── Narasi NLG ───────────────────────────────────────────────────────
         st.markdown("### 💡 Insight")
-        narasi = build_narasi(label, prob_pred, shap_hoaks)
-        st.info(narasi)
+        st.info(build_narasi(label, prob_pred, shap_hoaks))
 
-        # ── Visualisasi SHAP ───────────────────────────────────────────────
+        # ── Visualisasi SHAP ─────────────────────────────────────────────────
         st.markdown("### 🎨 Visualisasi SHAP")
         tab1, tab2, tab3 = st.tabs(["📝 Text Highlight", "📉 Waterfall Plot", "📊 Data Tabel SHAP"])
 
@@ -324,8 +183,7 @@ if run:
             try:
                 html_out = shap.plots.text(shap_hoaks[0], display=False)
                 if html_out:
-                    html_wrapper = f'<div class="shap-html-container">{html_out}</div>'
-                    st.iframe(html_wrapper, height=350)
+                    st.iframe(f'<div class="shap-html-container">{html_out}</div>', height=350)
                 else:
                     st.info("Text plot tidak tersedia untuk teks ini.")
             except Exception as e:
@@ -334,7 +192,6 @@ if run:
         with tab2:
             st.markdown("Grafik ini menunjukkan secara bertahap bagaimana setiap fitur menambah atau mengurangi probabilitas prediksi.")
             buf = waterfall_fig(shap_hoaks, top_n_display, label, prob_pred)
-
             col_left, col_center, col_right = st.columns([1, 3, 1])
             with col_center:
                 st.image(buf, width="stretch")
@@ -347,9 +204,9 @@ if run:
             df_shap = pd.DataFrame(ranked, columns=["Token", "SHAP Value"])
 
             def color_shap(val):
-                if val > 0:   return 'background-color: #ffcccc'
-                if val < 0:   return 'background-color: #ccccff'
-                return 'background-color: transparent'
+                if val > 0: return "background-color: #ffcccc"
+                if val < 0: return "background-color: #ccccff"
+                return "background-color: transparent"
 
             styled_df = df_shap.style.map(color_shap, subset=["SHAP Value"]).format({"SHAP Value": "{:.10f}"})
             st.dataframe(styled_df, width="stretch", height=300)
